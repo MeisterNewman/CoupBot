@@ -1,9 +1,8 @@
-import game, models
+import game
 import numpy as np
 from random import random, shuffle
 
-from keras import backend as K
-K.set_floatx('float32')
+
 
 
 
@@ -55,7 +54,7 @@ class ActionEvaluatorQueue: #This allows us to give action evaluation inputs and
         return self.output.shape[0]
 
     def read_complete_data(self):
-        if type(self.output)==type(None) or self.output.shape[0]<16:
+        if type(self.output)==type(None):
             return -1
         num_valid = self.output.shape[0]
         assert self.inputs[0].shape[0] >= num_valid

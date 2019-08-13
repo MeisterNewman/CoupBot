@@ -4,7 +4,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import keras
 from keras.layers import Input, Dense, Dropout, Reshape, Flatten, Lambda
-
+from keras import backend as K
+K.set_floatx('float32')
 
 import game
 
@@ -64,7 +65,7 @@ def get_game_state_predictor(): #Generate a network to predict state of cards in
                                      num_coins,
                                      action_input),
                              outputs=stackLayers(layers))
-    net.compile(optimizer=keras.optimizers.Adam(), loss='mse', metrics=['accuracy'])
+    net.compile(optimizer=keras.optimizers.Adam(.003), loss='mse', metrics=['accuracy'])
     return net
 
 def get_action_evaluator():#Generates a network to decide the value of an action, given game state.    May want to make it a conv 1d net for the prior probability input
@@ -115,7 +116,7 @@ def get_action_evaluator():#Generates a network to decide the value of an action
                                      action,
                                      target),
                              outputs=stackLayers(layers))
-    net.compile(optimizer=keras.optimizers.Adam(), loss='mse', metrics=['accuracy'])
+    net.compile(optimizer=keras.optimizers.Adam(.003), loss='mse', metrics=['accuracy'])
     return net
 
 def get_block_evaluator(steal): #Generates reward evaluator for a specific blocking action. Set steal=true iff that action is stealing
@@ -141,8 +142,6 @@ def get_block_evaluator(steal): #Generates reward evaluator for a specific block
                                   action]),
         Dense(64, activation='relu'),
         Dropout(.3),
-        Dense(64, activation='relu'),
-        Dropout(.3),
         Dense(32, activation='relu'),
         Dropout(.3),
         Dense(8, activation='relu'),
@@ -157,7 +156,7 @@ def get_block_evaluator(steal): #Generates reward evaluator for a specific block
                                      random_noise,
                                      action),
                              outputs=stackLayers(layers))
-    net.compile(optimizer=keras.optimizers.Adam(), loss='mse', metrics=['accuracy'])
+    net.compile(optimizer=keras.optimizers.Adam(.003), loss='mse', metrics=['accuracy'])
     return net
 
 
@@ -206,7 +205,7 @@ def get_challenge_evaluator(): #Generates reward evaluator for challenges.
                                      challengable_input,
                                      challenge),
                              outputs=stackLayers(layers))
-    net.compile(optimizer=keras.optimizers.Adam(), loss='mse', metrics=['accuracy'])
+    net.compile(optimizer=keras.optimizers.Adam(.003), loss='mse', metrics=['accuracy'])
     return net
 
 
