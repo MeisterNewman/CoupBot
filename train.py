@@ -1,6 +1,6 @@
 import game
 import numpy as np
-from random import random, shuffle
+from random import random, shuffle, randrange
 
 
 
@@ -106,6 +106,7 @@ class GameTrainingWrapper:
             self.captain_block_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.challenge_evaluation_data_queues += [ActionEvaluatorQueue()]
 
+        #self.hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
         self.all_data_queues = [self.action_evaluation_data_queues, self.assassin_block_evaluation_data_queues, self.aid_block_evaluation_data_queues, self.captain_block_evaluation_data_queues, self.challenge_evaluation_data_queues]
 
     def print_game_state(self):
@@ -157,26 +158,10 @@ class GameTrainingWrapper:
             ))
         return (decision, np.argmax(predicted_values))
 
-    def decide_communal_challenge(self, challengers, challengee, action):   #Deciding who challenges by relative maximal is bad for people who are winning
-        results = [self.decide_challenge(x, challengee, action, write_decision_to_training=True) for x in challengers]
-
-        if (True in [x[0] for x in results]): #If someone decided to challenge
-            max_index = 0
-            for i in range (1, len(challengers)):
-                if results[i][1]>results[max_index][1] and results[i][0]:
-                    max_index=i
-            # print("Communal responder: ", challengers[max_index])
-            return (True, challengers[max_index])
-
-        else:
-            return (False,-1)
-
-
-
-
-
-
-
+    def decide_communal_challenge(self, challengers, challengee, action):
+        poss_chal = randrange(0, len(challengers))
+        result = self.decide_challenge(challengers[poss_chal], challengee, action, write_decision_to_training=True)
+        return (result, challengers[poss_chal])
 
     def decide_block(self, blocker, blockee, action, write_decision_to_training):
         blocker=int(blocker)

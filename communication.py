@@ -9,7 +9,7 @@ class CommunicationChannel:  #A communication channel sends one object at a time
         self.poller.register(self.info_out, select.POLLIN)
     def write(self, obj):
         dump=pickle.dumps(obj, -1)
-        os.write(self.signal_in, (" " + str(len(dump))).encode())
+        os.write(self.signal_in, (str(len(dump))+" ").encode())
         os.write(self.info_in, dump)
 
     def has_data(self):
@@ -19,17 +19,25 @@ class CommunicationChannel:  #A communication channel sends one object at a time
         self.poller.poll()
 
     def read(self):
-        lengths = os.read(self.signal_out, 2 ** 16).decode()[1:]
-        if " " in lengths:
-            os.write(self.signal_in, lengths[lengths.index(" "):].encode())
-            length = lengths[:lengths.index(" ")]
-        else:
-            length = lengths
-        length=int(length)
+        length = '_'
+        while length[-1]!=' ':
+            length += os.read(self.signal_out, 1).decode()
+        length=int(length[1:-1])
         data = b''
         while len(data)<length:
             data+=os.read(self.info_out, length-len(data))
+        try:
+            pickle.loads(data)
+        except:
+            print(len(data), length)
         return pickle.loads(data)
+
+    def __del__(self):
+        os.close(self.signal_in)
+        os.close(self.signal_out)
+        os.close(self.info_in)
+        os.close(self.info_out)
+
 
 
 

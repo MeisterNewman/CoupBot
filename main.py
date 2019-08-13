@@ -18,177 +18,166 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 7000
-num_threads = 15
+games_per_thread = 1000
+num_threads = 128
+NUM_EVALUATORS = 5
 
-pids = []
+
+#Each thread has one pair of channels for each model: one to send data to it, one to receive data from it.
 thread_pipes = []
+for i in range (num_threads+1):
+    thread_pipes += [[]]
+    for i in range (NUM_EVALUATORS):
+        thread_pipes[-1] += [[CommunicationChannel(), CommunicationChannel()]]
 
-supervisor_process = True
 
-my_index = -1
-for i in range (num_threads):
-    thread_pipes+=[[]]
-    for j in range (7):
-        thread_pipes[-1]+=[CommunicationChannel()]
-    pids+=[os.fork()]
-    if pids[-1]==0: #If we are the child thread:
-        my_index=len(thread_pipes)-1
-        supervisor_process = False
-        my_pipes=thread_pipes.pop(-1)
+game_thread = False
+trainer_thread = False
+model_pids = []
+for i in range (NUM_EVALUATORS):
+    model_pids+=[os.fork()]
+    if model_pids[-1]==0:
+        import models
+
+        model_index = len(model_pids)-1
+        trainer_thread = True
+        thread_pipes = [i[model_index] for i in thread_pipes]
+        model_data_pipes = thread_pipes
+
+        if model_index == 0:
+            model = models.get_action_evaluator()
+        elif model_index == 1:
+            model = models.get_block_evaluator(steal=False)
+        elif model_index == 2:
+            model = models.get_block_evaluator(steal=False)
+        elif model_index == 3:
+            model = models.get_block_evaluator(steal=True)
+        elif model_index == 4:
+            model = models.get_challenge_evaluator()
+        else:
+            raise RuntimeError("Too many models!")
 
         break
 
 
 
 
-if supervisor_process: # If we are not the supervisor process, begin running games.
-    import models
 
-    action_evaluator = models.get_action_evaluator()
-    assassin_block_evaluator = models.get_block_evaluator(steal=False)
-    aid_block_evaluator = models.get_block_evaluator(steal=False)
-    captain_block_evaluator = models.get_block_evaluator(steal=True)
-    challenge_evaluator = models.get_challenge_evaluator()
 
-    evaluators = [
-        action_evaluator,
-        assassin_block_evaluator,
-        aid_block_evaluator,
-        captain_block_evaluator,
-        challenge_evaluator,
-    ]
+if trainer_thread:
 
-    num_threads_running = num_threads
 
-    model_eval_stacks = [None, None, None, None, None]
-    model_eval_owner_stacks = [[], [], [], [], []]
-    threads_waiting_for_eval = []
-    thread_running = []
-    for i in range (num_threads):
-        threads_waiting_for_eval += [False]
-        thread_running += [True]
+    eval_stack = None
+    eval_owner_stack = []
+    training_data_x_stack = None
+    training_data_y_stack = None
+    while 1:
+        for i in range (len(model_data_pipes)):
+            if model_data_pipes[i][0].has_data():
+                if model_data_pipes[i][0].read()=="t": # If the data is training data, add it to the stacks
+                    data = model_data_pipes[i][0].read()
+                    if training_data_x_stack is None:
+                        training_data_x_stack = data[0]
+                        training_data_y_stack = data[1]
+                    else:
+                        training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
+                        training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
+                else:
+                    data = model_data_pipes[i][0].read()  # It's evaluation data
+                    if eval_stack is None:  # If the stack is empty, set it to this data
+                        eval_stack = data
+                    else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
+                        eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
+                    eval_owner_stack += [[i, data[0].shape[0]]]
 
-    training_data_stacks = [[None, None], [None, None], [None, None], [None, None], [None, None]]
+        if not (eval_stack is None):
+            #print("Started eval")
+            eval_result = model.predict(eval_stack, verbose=0)
+            #print("Finished eval")
+            stack_index = 0
+            for i in range (len(eval_owner_stack)):
+                model_data_pipes[eval_owner_stack[i][0]][1].write(eval_result[stack_index:stack_index+eval_owner_stack[i][1]])
+                stack_index += eval_owner_stack[i][1]
+            assert stack_index == eval_result.shape[0]
 
-    cycle = 0
-    while num_threads_running>0:
-        for thread in range (num_threads):  #Go through all threads, checking to see if they have data that needs to be evaluated. If so, add it to the evaluation stacks
-            if thread_running[thread] and not threads_waiting_for_eval[thread]:
-                if thread_pipes[thread][0].has_data():
-                    index=thread_pipes[thread][0].read()
-                    data=thread_pipes[thread][0].read()
-                    if type(model_eval_stacks[index])==type(None):  #If the stack is empty, set it to this data
-                        model_eval_stacks[index] = data
-                    else: #Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
-                        model_eval_stacks[index] = concatenate_lists_of_arrays(model_eval_stacks[index], data)
-                    model_eval_owner_stacks[index] += [[thread, data[0].shape[0]]]
+            eval_stack = None
+            eval_owner_stack = []
 
-                    threads_waiting_for_eval[thread] = True
-        if cycle % 1 == 0:
-            for q in range (1):
-                queue_depths = [len(i) for i in model_eval_owner_stacks]
-                deepest_evaluation_queue = queue_depths.index(max(queue_depths))
-                if queue_depths[deepest_evaluation_queue]>0:  # If there is something in the maximal evaluation queue
-                    evaluation_result = evaluators[deepest_evaluation_queue].predict(model_eval_stacks[deepest_evaluation_queue], verbose=0)
-                    stack_index=0
-                    for i in range (len(model_eval_owner_stacks[deepest_evaluation_queue])):  # Write back the results to each thread
-                        thread=model_eval_owner_stacks[deepest_evaluation_queue][i][0]
-                        thread_pipes[thread][1].write(evaluation_result[stack_index:stack_index+model_eval_owner_stacks[deepest_evaluation_queue][i][1]])
-                        stack_index+=model_eval_owner_stacks[deepest_evaluation_queue][i][1]
-                        threads_waiting_for_eval[thread] = False
-                    assert stack_index == evaluation_result.shape[0]
-                    model_eval_stacks[deepest_evaluation_queue]=None
-                    model_eval_owner_stacks[deepest_evaluation_queue]=[]
+        if not (training_data_y_stack is None):
+            #print("Started train")
+            if training_data_y_stack.shape[0]>256: #Minimum cap for training. Increasing this makes more sims run, but also increases the functional batch size.
+                model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0)
+                training_data_x_stack = None
+                training_data_y_stack = None
+            #print("Finished train")
 
-            for thread in range (num_threads):
-                if thread_running[thread] and not threads_waiting_for_eval[thread]:
-                    for index in range (0,5):
-                        if thread_pipes[thread][2+index].has_data():
-                            data = thread_pipes[thread][2+index].read()
-                            # print(data)
-                            if training_data_stacks[index][0] is None:
-                                training_data_stacks[index][0] = data[0]
-                                training_data_stacks[index][1] = data[1]
-                            else:
-                                training_data_stacks[index][0] = concatenate_lists_of_arrays(training_data_stacks[index][0], data[0])
-                                training_data_stacks[index][1] = np.concatenate([training_data_stacks[index][1], data[1]], axis=0)
 
-            for i in range (len(training_data_stacks)):  # For each stack, check if it has enough data to train. If so, train it
-                if type(training_data_stacks[i][1])!=type(None) and training_data_stacks[i][1].shape[0] > 256:
-                    evaluators[i].fit(training_data_stacks[i][0], training_data_stacks[i][1], batch_size=32, epochs=1, verbose=0)
-                    training_data_stacks[i]=[None, None]
-        if cycle%100 == 0:
-            for i in range (num_threads):
-                if thread_running[i]:
-                    if os.waitpid(pids[i], os.WNOHANG) != (0,0):
-                        thread_running[i]=False
-                        num_threads_running-=1
-
-        cycle+=1
-
-else:
-    import train
+else: #If we are not a trainer thread, we are still the top thread: set up game threads now.
     class ModelRequestWrapper:
-        def __init__(self, eval_in_channel, eval_out_channel, training_data_channel, flag):
+        def __init__(self, eval_in_channel, eval_out_channel):
             self.eval_in_channel = eval_in_channel
             self.eval_out_channel = eval_out_channel
-            self.training_data_channel = training_data_channel
-            self.flag=flag
 
         def fit(self, x, y, **kwargs):
-            self.training_data_channel.write((x,y))
+            self.eval_in_channel.write("t")
+            self.eval_in_channel.write((x, y))
 
         def predict(self, x, **kwargs):
-            self.eval_in_channel.write(self.flag)
+            #print("Started request")
+            self.eval_in_channel.write("p")
             self.eval_in_channel.write(x)
             self.eval_out_channel.idle_until_data()
-            data=self.eval_out_channel.read()
+            data = self.eval_out_channel.read()
+            #print("Finished request")
             return data
 
-    evaluators=[]
 
-    for i in range (5): #Generate the five evaluators. They will communicate with the parent process for direction
-        evaluators += [ModelRequestWrapper(my_pipes[0], my_pipes[1], my_pipes[2+i], i)]
-    action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators #Map them in
-    #print(action_evaluator)
-    #print(assassin_block_evaluator)
-    #print(aid_block_evaluator)
-    #print(captain_block_evaluator)
-    #print(challenge_evaluator)
+    my_index = -1
+    game_pids = []
+    for i in range(num_threads):
+        game_pids += [os.fork()]
+        if game_pids[-1] == 0:  # If we are the child thread:
+            my_index = len(game_pids) - 1
+            game_thread = True
+            thread_pipes = thread_pipes[my_index]
+            my_pipes = thread_pipes
+            break
 
-    for i in range (games_per_thread):
-        if my_index==0:
-            print("Playing game", i)
-        trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
-                                            captain_block_evaluator, challenge_evaluator)
-        game_continuing = True
+    if game_thread:
+        import train
+        evaluators = []
+        for i in range (5): #Generate the five evaluators. They will communicate with the parent process for direction
+            evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
+        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators #Map them in
+
+        for i in range (games_per_thread):
+            if my_index==0:
+                print("Playing game", i)
+            trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
+                                                captain_block_evaluator, challenge_evaluator)
+            game_continuing = True
+            while game_continuing:
+                game_continuing = trainer.take_turn()
+            trainer.train_all_evaluators(verbose=0)  # Indent this for more frequent training
+
+        os._exit(0)
+
+
+    else:  # If we are the central supervisory process, wait for all game-playing threads to terminate.
+        my_pipes = thread_pipes[-1]
+        del thread_pipes
+        for i in range (num_threads):
+            if os.waitpid(game_pids[i], 0) != (0,0): # could do os.WNOHANG
+                num_threads_running-=1
+
+        evaluators = []
+        for i in range(5):  # Generate the five evaluators. They will communicate with the parent process for direction
+            evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
+        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators  # Map them in
+
+        import train
+        trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator)
+        game_continuing=True
         while game_continuing:
-            game_continuing = trainer.take_turn()
-        trainer.train_all_evaluators(verbose=0)  # Indent this for more frequent training
+            game_continuing = trainer.take_turn(verbose=True)
 
-    os._exit(0)
-
-
-
-import train
-trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator)
-game_continuing=True
-while game_continuing:
-    game_continuing = trainer.take_turn(verbose=True)
-
-
-# import cProfile
-#
-# def f():
-#     for i in range(1000):
-#         if i % 100 == 0:
-#             print(i)
-#         trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
-#                                             captain_block_evaluator, challenge_evaluator)
-#         game_continuing = True
-#         while game_continuing:
-#             game_continuing = trainer.take_turn()
-#         trainer.train_all_evaluators(verbose=0)
-#
-# cProfile.run("f()")

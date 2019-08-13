@@ -7,9 +7,20 @@ from keras.layers import Input, Dense, Dropout, Reshape, Flatten, Lambda
 from keras import backend as K
 K.set_floatx('float32')
 
+import tensorflow as tf
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+K.tensorflow_backend.set_session(tf.Session(config=config))
+
+
+
+
 import game
 
-
+import numpy as np
+def concatenate_lists_of_arrays(l1, l2):
+    # print([i.shape for i in l1], "\n", [i.shape for i in l2])
+    return [np.concatenate([l1[i], l2[i]], axis=0) for i in range (len(l1))]
 
 
 
