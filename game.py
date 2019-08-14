@@ -135,3 +135,5 @@ class CoupGame:
         self.deck+=[card]
         self.shuffle()
         self.hands[player]+=[self.draw_from_deck()]
+
+

@@ -7,10 +7,7 @@ from random import random, shuffle, randrange
 
 
 def row_to_first(arr,row): #Given a given index in a numpy array, return a copy of the array with that index first (moving all between it and first in the process)
-    if row==arr.shape[0]-1:
-        return np.roll(arr,1, axis=0)
-    else:
-        return np.concatenate([np.roll(arr[:row+1],1, axis=0),arr[row+1:]])
+    return np.roll(arr,-row, axis=0)
 
 def rows_to_first_second(arr, row1, row2):
     return row_to_first(row_to_first(arr, row2), row1 if row1>row2 else row1+1)
@@ -85,7 +82,7 @@ def combine_ready_from_list(queue_list):
 
 
 class GameTrainingWrapper:
-    def __init__(self, num_players, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator):
+    def __init__(self, num_players, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, q_epsilon, verbose):
         self.game = game.CoupGame(num_players)
 
         self.action_evaluator = action_evaluator
@@ -109,6 +106,11 @@ class GameTrainingWrapper:
         #self.hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
         self.all_data_queues = [self.action_evaluation_data_queues, self.assassin_block_evaluation_data_queues, self.aid_block_evaluation_data_queues, self.captain_block_evaluation_data_queues, self.challenge_evaluation_data_queues]
 
+        self.q_epsilon = q_epsilon
+        self.verbose = verbose
+
+        self.next_turn_q_biases = [0]*game.MAX_PLAYERS
+
     def print_game_state(self):
         print ("Raw hands:", self.game.hands)
         print ("Hands: ", [game.cards_to_names(i) for i in self.game.hands])
@@ -131,19 +133,23 @@ class GameTrainingWrapper:
         challengable_action = np.zeros((game.NUM_CHALLENGABLE_ACTIONS,))
         challengable_action[game.CHALLENGABLE_ACTIONS.index(action)]=1
 
-        predicted_values = self.challenge_evaluator.predict([
-            zero_axis_tile(nondiscarded_cards, 2),
-            zero_axis_tile(challenger_cards, 2),
-            zero_axis_tile(prior_probability, 2),
-            zero_axis_tile(num_cards, 2),
-            zero_axis_tile(num_coins, 2),
-            zero_axis_tile(noise, 2),
-            zero_axis_tile(challengable_action, 2),
-            np.array([[0],[1]], dtype=np.float32),
-        ]).flatten()
+        if random() > self.q_epsilon:
+            predicted_values = self.challenge_evaluator.predict([
+                zero_axis_tile(nondiscarded_cards, 2),
+                zero_axis_tile(challenger_cards, 2),
+                zero_axis_tile(prior_probability, 2),
+                zero_axis_tile(num_cards, 2),
+                zero_axis_tile(num_coins, 2),
+                zero_axis_tile(noise, 2),
+                zero_axis_tile(challengable_action, 2),
+                np.array([[0],[1]], dtype=np.float32),
+            ]).flatten()
+            #decision=np.random.choice(2,1,p=predicted_values/np.sum(predicted_values))[0]
+            decision = np.argmax(predicted_values)
+        else:
+            decision = randrange(2)
 
 
-        decision=np.random.choice(2,1,p=predicted_values/np.sum(predicted_values))[0]
 
         if write_decision_to_training:
             self.challenge_evaluation_data_queues[challenger].append_inputs((
@@ -156,7 +162,10 @@ class GameTrainingWrapper:
                 challengable_action,
                 np.array([1 if decision else 0], dtype=np.float32),
             ))
-        return (decision, np.argmax(predicted_values))
+
+        if self.verbose and decision>0:
+            print (challenger, "challenged" + ((" with expected value "+str(np.max(predicted_values))) if 'predicted_values' in vars() else "" ) )
+        return (decision, np.max(predicted_values) if 'predicted_values' in vars() else 0)
 
     def decide_communal_challenge(self, challengers, challengee, action):
         poss_chal = randrange(0, len(challengers))
@@ -193,23 +202,27 @@ class GameTrainingWrapper:
         options = 3 if is_captain else 2
         option_array = np.array([[0,0],[1,0],[0,1]], dtype=np.float32) if is_captain else np.array([[0],[1]], dtype=np.float32)
 
-        predicted_values = evaluator.predict([
-            zero_axis_tile(nondiscarded_cards, options),
-            zero_axis_tile(blocker_cards, options),
-            zero_axis_tile(prior_probability, options),
-            zero_axis_tile(num_cards, options),
-            zero_axis_tile(num_coins, options),
-            zero_axis_tile(noise, options),
-            option_array,
-        ]).flatten()
+        if random()>self.q_epsilon:
+            predicted_values = evaluator.predict([
+                zero_axis_tile(nondiscarded_cards, options),
+                zero_axis_tile(blocker_cards, options),
+                zero_axis_tile(prior_probability, options),
+                zero_axis_tile(num_cards, options),
+                zero_axis_tile(num_coins, options),
+                zero_axis_tile(noise, options),
+                option_array,
+            ]).flatten()
+            #decision_index = np.random.choice(3 if is_captain else 2, 1, p=predicted_values / np.sum(predicted_values))[0]
+            decision_index = np.argmax(predicted_values)
+        else:
+            decision_index = randrange(3 if is_captain else 2)
 
-        decision_index = np.random.choice(3 if is_captain else 2, 1, p=predicted_values / np.sum(predicted_values))[0]
         decision=decision_index
         if is_captain:
             if decision_index==1:
                 decision=game.CAPTAIN
             if decision_index==2:
-                decision=game.CAPTAIN
+                decision=game.AMBASSADOR
 
         if write_decision_to_training:
             data_queue.append_inputs((
@@ -221,19 +234,24 @@ class GameTrainingWrapper:
                 noise,
                 option_array[decision_index],
             ))
-
-        return (decision, np.max(predicted_values))
+        if self.verbose and decision>0:
+            print (blocker, "blocked" + ((" with expected value "+str(np.max(predicted_values))) if 'predicted_values' in vars() else "" ) )
+        return (decision, np.max(predicted_values) if 'predicted_values' in vars() else 0)
 
     def decide_communal_block(self, blockers, blockee, action):
+        wv=self.verbose
+        self.verbose=False
         results = [self.decide_block(x, blockee, action, write_decision_to_training=True) for x in
                    blockers]
-
+        self.verbose=wv
         if (True in [x[0] for x in results]):  # If someone decided to challenge
             max_index = 0
             for i in range(1, len(blockers)):
                 if results[i][1] > results[max_index][1] and results[i][0]:
                     max_index = i
             # print ("Communal responder: ", blockers[max_index])
+            if self.verbose:
+                print(blockers[max_index], "blocked")
             return (True, blockers[max_index])
 
         else:
@@ -247,7 +265,12 @@ class GameTrainingWrapper:
 
     def lose_card(self, player):
         if len(self.game.hands[player])>0:
-            self.game.hands[player].pop(0)
+            self.game.discards+=[self.game.hands[player].pop(0)]
+
+        LOSS_BIAS=.3
+        self.next_turn_q_biases[player]-=LOSS_BIAS  # Bias for losing a card
+        for i in range (game.MAX_PLAYERS):
+            self.next_turn_q_biases[i]+=LOSS_BIAS/self.game.num_players
 
 
     def coup(self, actor, target):
@@ -282,11 +305,7 @@ class GameTrainingWrapper:
 
 
 
-
-
-
-
-    def take_turn(self, verbose=False):
+    def take_turn(self):
         turn_taker=self.game.turn
 
         undiscarded_cards = self.game.count_inplay()
@@ -298,22 +317,21 @@ class GameTrainingWrapper:
 
         targets = self.game.players_in()
         targets.remove(turn_taker)
-        targets = [(t-1 if t>turn_taker else t) for t in targets] #Shift targets to align with their input info
-        num_targets=len(targets)
+        rel_targets = [(t-turn_taker-1)%game.MAX_PLAYERS for t in targets]  # Shift targets to align with their input info
+        num_targets = len(targets)
         tlist = []
         alist = []
         for a in game.ACTIVE_ACTIONS:
-            if (a!=game.COUP or num_coins[0]>=7) and (a==game.COUP or num_coins[0]<10) and (a!=game.ASSASSINATE or num_coins[0]>=3): #If the action is in fact valid
-                alist+=[a]*num_targets
-                tlist+=targets
+            if (a != game.COUP or num_coins[0] >= 7) and (a == game.COUP or num_coins[0] < 10) and (
+                    a != game.ASSASSINATE or num_coins[0] >= 3):  # If the action is in fact valid
+                alist += [a] * num_targets
+                tlist += rel_targets
         action_inputs = np.array(alist, dtype=np.float32)
         target_inputs = np.array(tlist, dtype=np.float32)
 
+        num_options = action_inputs.shape[0]
 
-        num_options=action_inputs.shape[0]
-
-
-        predicted_rewards=self.action_evaluator.predict([
+        inputs = [
             zero_axis_tile(undiscarded_cards, num_options),
             zero_axis_tile(turn_taker_cards, num_options),
             zero_axis_tile(prior_probability, num_options),
@@ -323,38 +341,39 @@ class GameTrainingWrapper:
 
             one_hot(action_inputs, game.NUM_ACTIVE_ACTIONS),
             one_hot(target_inputs, game.MAX_PLAYERS-1),
-        ]).flatten()
+        ]
+        predicted_rewards = self.action_evaluator.predict(inputs).flatten()
 
         # Choose the action for our next move.
-        choice_index = np.random.choice(num_options, 1, p=predicted_rewards / np.sum(predicted_rewards))[0]
+        if random()>self.q_epsilon:
+            choice_index = np.argmax(predicted_rewards)
+        else:
+            choice_index = randrange(num_options)
+
+
         action = action_inputs[choice_index]
         target = target_inputs[choice_index]
-        if target >= turn_taker:  # Adjust the target
-            target += 1
 
-        targets = [(t +1 if t >= turn_taker else t) for t in targets]  # Shift targets back
+        target = (target+1+turn_taker) %game.MAX_PLAYERS
 
-        action=int(action)
-        target=int(target)
+
+        action = int(action)
+        target = int(target)
 
         # Append the best state this turn to the output stack for any decisions made in the past turn
         for qset in self.all_data_queues:
             q=qset[turn_taker]
             while q.num_inputs()>q.num_outputs():
-                q.append_output(np.array([np.max(predicted_rewards)]))
+                q.append_output(np.array([np.max(predicted_rewards) + self.next_turn_q_biases[turn_taker]]))
+
+        # Reset the bias
+        self.next_turn_q_biases[turn_taker] = 0
 
         # Append the inputs which gave our current action to the input stack. Output won't be known until next turn
-        self.action_evaluation_data_queues[turn_taker].append_inputs((
-            undiscarded_cards,
-            turn_taker_cards,
-            prior_probability,
-            num_cards,
-            num_coins,
-            noise,
-            one_hot(np.array([action_inputs[choice_index]]), game.NUM_ACTIVE_ACTIONS)[0],
-            one_hot(np.array([target_inputs[choice_index]]), game.MAX_PLAYERS-1)[0],
-        ))
-        if verbose:
+        self.action_evaluation_data_queues[turn_taker].append_inputs(
+            [x[choice_index] for x in inputs]
+        )
+        if self.verbose:
             print("\n")
             print("Turn:", turn_taker)
             print("Deck:", game.cards_to_names(self.game.deck))
@@ -485,6 +504,8 @@ class GameTrainingWrapper:
                     for queue_type in self.all_data_queues:
                         while queue_type[i].num_outputs() < queue_type[i].num_inputs():
                             queue_type[i].append_output(np.array([1], dtype=np.float32))
+                    if self.verbose:
+                        print ("Player", i, "won")
             return False
 
     def train_evaluator(self, data_queue_list, evaluator, verbose):
