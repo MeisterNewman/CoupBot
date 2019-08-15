@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 2000
+games_per_thread = 2500
 num_threads = 128
 NUM_EVALUATORS = 5
 
@@ -72,7 +72,7 @@ if trainer_thread:
     training_data_y_stack = None
 
     min_length_table = {
-        0: 24,
+        0: 36,
         1: 4,
         2: 4,
         3: 4,
@@ -100,7 +100,7 @@ if trainer_thread:
 
             if (len(eval_owner_stack)>= min_length_table[model_index]):
                 #print("Started eval")
-                eval_result = model.predict(eval_stack, verbose=0, batch_size=512)
+                eval_result = model.predict(eval_stack, verbose=0, batch_size=4096)
                 #print("Finished eval")
                 stack_index = 0
                 for i in range (len(eval_owner_stack)):
