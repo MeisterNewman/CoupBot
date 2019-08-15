@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 2
+games_per_thread = 20000
 num_threads = 128
 NUM_EVALUATORS = 5
 
@@ -85,7 +85,6 @@ if trainer_thread:
                         training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
                         training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
                     no_data=False
-                    act=False
                 else:
                     data = model_data_pipes[i][0].read()  # It's evaluation data
                     if eval_stack is None:  # If the stack is empty, set it to this data
@@ -94,7 +93,6 @@ if trainer_thread:
                         eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
                     eval_owner_stack += [[i, data[0].shape[0]]]
                     no_data=False
-                    act=False
             if (len(eval_owner_stack)>8 or (len(eval_owner_stack)>0 and act)):
                 #print("Started eval")
                 eval_result = model.predict(eval_stack, verbose=0)
@@ -106,6 +104,7 @@ if trainer_thread:
                 assert stack_index == eval_result.shape[0]
                 eval_stack = None
                 eval_owner_stack = []
+                act=False
         if no_data:
             act=True
         if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048 or act):
@@ -150,7 +149,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
     if game_thread:
         import train
         evaluators = []
-        for i in range (5): #Generate the five evaluators. They will communicate with the parent process for direction
+        for i in range (NUM_EVALUATORS): #Generate the five evaluators. They will communicate with the parent process for direction
             evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
         action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators #Map them in
 
@@ -175,7 +174,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
                 num_threads_running-=1
 
         evaluators = []
-        for i in range(5):  # Generate the five evaluators. They will communicate with the parent process for direction
+        for i in range(NUM_EVALUATORS):  # Generate the evaluators. They will communicate with the parent process for direction
             evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
         action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators  # Map them in
 
@@ -187,4 +186,3 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
         for p in model_pids:
             os.kill(p, 15) #SIGTERM all model processes
-
