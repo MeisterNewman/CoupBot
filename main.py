@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 20000
+games_per_thread = 2000
 num_threads = 128
 NUM_EVALUATORS = 5
 
@@ -71,9 +71,15 @@ if trainer_thread:
     training_data_x_stack = None
     training_data_y_stack = None
 
-    act=False
+    min_length_table = {
+        0: 24,
+        1: 4,
+        2: 4,
+        3: 4,
+        4: 2,
+    }
+
     while 1:
-        no_data = True
         for i in range (len(model_data_pipes)):
             if model_data_pipes[i][0].has_data():
                 if model_data_pipes[i][0].read()=="t": # If the data is training data, add it to the stacks
@@ -84,7 +90,6 @@ if trainer_thread:
                     else:
                         training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
                         training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
-                    no_data=False
                 else:
                     data = model_data_pipes[i][0].read()  # It's evaluation data
                     if eval_stack is None:  # If the stack is empty, set it to this data
@@ -92,10 +97,10 @@ if trainer_thread:
                     else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
                         eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
                     eval_owner_stack += [[i, data[0].shape[0]]]
-                    no_data=False
-            if (len(eval_owner_stack)>8 or (len(eval_owner_stack)>0 and act)):
+
+            if (len(eval_owner_stack)>= min_length_table[model_index]):
                 #print("Started eval")
-                eval_result = model.predict(eval_stack, verbose=0)
+                eval_result = model.predict(eval_stack, verbose=0, batch_size=512)
                 #print("Finished eval")
                 stack_index = 0
                 for i in range (len(eval_owner_stack)):
@@ -104,14 +109,10 @@ if trainer_thread:
                 assert stack_index == eval_result.shape[0]
                 eval_stack = None
                 eval_owner_stack = []
-                act=False
-        if no_data:
-            act=True
-        if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048 or act):
-            model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0)
+        if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048):
+            model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0, shuffle=False, )
             training_data_x_stack = None
             training_data_y_stack = None
-            checks_until_train = num_threads
 
 
 
@@ -166,6 +167,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
 
     else:  # If we are the central supervisory process, wait for all game-playing threads to terminate.
+        print ("All children successfully started.")
         num_threads_running = num_threads
         my_pipes = thread_pipes[-1]
         del thread_pipes
