@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 2500
+games_per_thread = 25
 num_threads = 128
 NUM_EVALUATORS = 5
 
@@ -34,6 +34,7 @@ for i in range (num_threads+1):
 game_thread = False
 trainer_thread = False
 model_pids = []
+
 for i in range (NUM_EVALUATORS):
     model_pids+=[os.fork()]
     if model_pids[-1]==0:
@@ -65,6 +66,7 @@ for i in range (NUM_EVALUATORS):
 
 if trainer_thread:
 
+    from time import perf_counter
 
     eval_stack = None
     eval_owner_stack = []
@@ -78,7 +80,8 @@ if trainer_thread:
         3: 4,
         4: 2,
     }
-
+    last_eval_time=perf_counter()
+    greedy_eval=False
     while 1:
         for i in range (len(model_data_pipes)):
             if model_data_pipes[i][0].has_data():
@@ -98,7 +101,7 @@ if trainer_thread:
                         eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
                     eval_owner_stack += [[i, data[0].shape[0]]]
 
-            if (len(eval_owner_stack)>= min_length_table[model_index]):
+            if (len(eval_owner_stack)>=min_length_table[model_index]) or (greedy_eval and len(eval_owner_stack)>0):
                 #print("Started eval")
                 eval_result = model.predict(eval_stack, verbose=0, batch_size=4096)
                 #print("Finished eval")
@@ -109,10 +112,14 @@ if trainer_thread:
                 assert stack_index == eval_result.shape[0]
                 eval_stack = None
                 eval_owner_stack = []
+                last_eval_time=perf_counter()
+
         if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048):
             model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0, shuffle=False, )
             training_data_x_stack = None
             training_data_y_stack = None
+        if perf_counter() - last_eval_time > 10:
+            greedy_eval = True
 
 
 
