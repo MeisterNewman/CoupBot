@@ -516,58 +516,59 @@ class GameTrainingWrapper:
 
         if (action == game.ASSASSINATE):
             blocking_info = self.decide_block(target, turn_taker, game.ASSASSINATE, write_decision_to_training=True)
-            if blocking_info[0]: #If they are blocking, we can challenge
-                self.game.player_coins[turn_taker] -= 3
-                challenge_info = self.decide_challenge(turn_taker, target, game.BLOCK_ASSASSINATE, write_decision_to_training=True)
-                if challenge_info[0]:
-                    if self.game.has_card(target, game.CONTESSA):
-                        self.lose_card(turn_taker)
-                        self.game.replace(target, game.CONTESSA)
-                    else:
-                        self.lose_card(target)
-                        self.lose_card(target)
+            challenge_info = self.decide_challenge(target, turn_taker, game.ASSASSINATE, write_decision_to_training=True)
+            if blocking_info[0] or challenge_info[0]:  # If we block or challenge
+                if (not challenge_info[0]) or blocking_info[1]>challenge_info[1]:  # If we decide to block:
+                    self.game.player_coins[turn_taker] -= 3
+                    counter_challenge_info = self.decide_challenge(turn_taker, target, game.BLOCK_ASSASSINATE, write_decision_to_training=True)
+                    if counter_challenge_info[0]:
+                        if self.game.has_card(target, game.CONTESSA):
+                            self.lose_card(turn_taker)
+                            self.game.replace(target, game.CONTESSA)
+                        else:
+                            self.lose_card(target)
+                            self.lose_card(target)
 
-            else:
-                challenge_info = self.decide_challenge(turn_taker, target, game.ASSASSINATE, write_decision_to_training=True)
-                if challenge_info[0]:
+                else:  # If we challenge
                     if self.game.has_card(turn_taker, game.ASSASSIN):
                         self.lose_card(target)
                         self.assassinate(turn_taker, target)
                         self.game.replace(turn_taker, game.ASSASSIN)
                     else:
                         self.lose_card(turn_taker)
-                else:
-                    self.assassinate(turn_taker, target)
+            else:
+                self.assassinate(turn_taker, target)
 
         if (action == game.STEAL):
             blocking_info = self.decide_block(target, turn_taker, game.STEAL, write_decision_to_training=True)
-            if blocking_info[0]: #If they are blocking, we can challenge
-                blocking_card = game.CAPTAIN if blocking_info[0]==1 else game.AMBASSADOR
-                blocking_action = game.BLOCK_STEAL_CAPTAIN if blocking_info[0]==1 else game.BLOCK_STEAL_AMBASSADOR
+            challenge_info = self.decide_challenge(target, turn_taker, game.STEAL, write_decision_to_training=True)
 
-                challenge_info = self.decide_challenge(turn_taker, target, blocking_action, write_decision_to_training=True)
-                if challenge_info[0]:
-                    if self.game.has_card(target, blocking_card):
-                        self.lose_card(turn_taker)
-                        self.game.replace(target, blocking_card)
-                    else:
-                        self.lose_card(target)
-                        self.steal(turn_taker, target)
+            if blocking_info[0] or challenge_info[0]:
+                if (not challenge_info[0]) or blocking_info[1]>challenge_info[1]:  # If we decide to block:
+                    blocking_card = game.CAPTAIN if blocking_info[0] == 1 else game.AMBASSADOR
+                    blocking_action = game.BLOCK_STEAL_CAPTAIN if blocking_info[0] == 1 else game.BLOCK_STEAL_AMBASSADOR
+                    counter_challenge_info = self.decide_challenge(turn_taker, target, blocking_action,
+                                                           write_decision_to_training=True)
+                    if counter_challenge_info[0]:
+                        if self.game.has_card(target, blocking_card):
+                            self.lose_card(turn_taker)
+                            self.game.replace(target, blocking_card)
+                        else:
+                            self.lose_card(target)
+                            self.steal(turn_taker, target)
 
-            else:
-                challenge_info = self.decide_challenge(turn_taker, target, game.STEAL, write_decision_to_training=True)
-                if challenge_info[0]:
+                else:  # If we decide to challenge
                     if self.game.has_card(turn_taker, game.CAPTAIN):
                         self.lose_card(target)
                         self.steal(turn_taker, target)
                         self.game.replace(turn_taker, game.CAPTAIN)
                     else:
                         self.lose_card(turn_taker)
-                else:
-                    self.steal(turn_taker, target)
+            else:  # Otherwise, the steal just goes through
+                self.steal(turn_taker, target)
 
         players_alive=0
-        for i in range (self.game.num_players): # Fill in 0s for rewards for any eliminated players, and set their attributes to 0
+        for i in range (self.game.num_players):  # Fill in 0s for rewards for any eliminated players, and set their attributes to 0
             if self.game.hands[i]==[]:
                 for queue_type in self.all_data_queues:
                     while queue_type[i].num_outputs()<queue_type[i].num_inputs():
