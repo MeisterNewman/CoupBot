@@ -169,7 +169,7 @@ class GameTrainingWrapper:
 
     def decide_communal_challenge(self, challengers, challengee, action):
         poss_chal = randrange(0, len(challengers))
-        result = self.decide_challenge(challengers[poss_chal], challengee, action, write_decision_to_training=True)
+        result = self.decide_challenge(challengers[poss_chal], challengee, action, write_decision_to_training=True)[0]
         return (result, challengers[poss_chal])
 
     def decide_block(self, blocker, blockee, action, write_decision_to_training):
