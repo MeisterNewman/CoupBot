@@ -10,7 +10,12 @@ def row_to_first(arr,row): #Given a given index in a numpy array, return a copy 
     return np.roll(arr,-row, axis=0)
 
 def rows_to_first_second(arr, row1, row2):
-    return row_to_first(row_to_first(arr, row2), row1 if row1>row2 else row1+1)
+    cycle = (5**row1)*(7**row2) % (arr.shape[0]-2)
+    rows = (row1, row2) if row1<row2 else (row2, row1)
+    return np.concatenate([arr[row1:row1+1],
+                           arr[row2:row2+1],
+                           np.roll(np.concatenate([arr[:rows[0]], arr[rows[0]+1:rows[1]], arr[rows[1]+1:]], axis=0), cycle, axis=0),
+                           ], axis=0)
 
 
 def zero_axis_tile(arr,num): #Gives an array of num elements, each of whose elements is a copy of the given array. Useful for expanding repeated training data
@@ -103,7 +108,7 @@ class GameTrainingWrapper:
             self.captain_block_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.challenge_evaluation_data_queues += [ActionEvaluatorQueue()]
 
-        #self.hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
+        self.predicted_hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
         self.all_data_queues = [self.action_evaluation_data_queues, self.assassin_block_evaluation_data_queues, self.aid_block_evaluation_data_queues, self.captain_block_evaluation_data_queues, self.challenge_evaluation_data_queues]
 
         self.q_epsilon = q_epsilon
@@ -115,6 +120,21 @@ class GameTrainingWrapper:
         print ("Raw hands:", self.game.hands)
         print ("Hands: ", [game.cards_to_names(i) for i in self.game.hands])
         print("Coins: ", self.game.player_coins)
+
+
+    # def update_hand_states(self, player, action, target, failed_to_block=False): #Failed-to-block
+    #
+    #     nondiscarded_cards = self.game.count_inplay()
+    #
+    #     prior_probability = row_to_first(self.predicted_hand_states, player)
+    #     num_cards = row_to_first(self.game.hand_sizes(), player)
+    #     num_coins = rows_to_first_second(self.game.player_coins, player)
+    #
+    #     target = (target-player) % (game.MAX_PLAYERS-1)  #Make target relative
+    #
+    #     input = [
+    #         one_hot()
+    #     ]
 
 
     def decide_challenge(self, challenger, challengee, action, write_decision_to_training):
