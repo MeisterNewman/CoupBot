@@ -18,9 +18,9 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 25
+games_per_thread = 2500
 num_threads = 128
-NUM_EVALUATORS = 5
+NUM_EVALUATORS = 6
 
 
 #Each thread has one pair of channels for each model: one to send data to it, one to receive data from it.
@@ -34,6 +34,9 @@ for i in range (num_threads+1):
 game_thread = False
 trainer_thread = False
 model_pids = []
+
+manager_pid = os.getpid()
+
 
 for i in range (NUM_EVALUATORS):
     model_pids+=[os.fork()]
@@ -54,6 +57,8 @@ for i in range (NUM_EVALUATORS):
             model = models.get_block_evaluator(steal=True)
         elif model_index == 4:
             model = models.get_challenge_evaluator()
+        elif model_index == 5:
+            model = models.get_game_state_predictor()
         else:
             raise RuntimeError("Too many models!")
 
@@ -73,19 +78,21 @@ if trainer_thread:
     training_data_x_stack = None
     training_data_y_stack = None
 
-    min_length_table = {
-        0: 36,
+    min_length_table = { #The sum of these must be less than the total number of threads
+        0: 36,  # This and 5 may want to be changed
         1: 4,
         2: 4,
         3: 4,
         4: 2,
+        5: 36,
     }
     last_eval_time=perf_counter()
     greedy_eval=False
     while 1:
         for i in range (len(model_data_pipes)):
             if model_data_pipes[i][0].has_data():
-                if model_data_pipes[i][0].read()=="t": # If the data is training data, add it to the stacks
+                ins = model_data_pipes[i][0].read()
+                if ins=="t": # If the data is training data, add it to the stacks
                     data = model_data_pipes[i][0].read()
                     if training_data_x_stack is None:
                         training_data_x_stack = data[0]
@@ -93,13 +100,28 @@ if trainer_thread:
                     else:
                         training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
                         training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
-                else:
+                elif ins=="p":
                     data = model_data_pipes[i][0].read()  # It's evaluation data
                     if eval_stack is None:  # If the stack is empty, set it to this data
                         eval_stack = data
                     else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
                         eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
                     eval_owner_stack += [[i, data[0].shape[0]]]
+                else: #We must both fit to and predict on this data
+                    data = model_data_pipes[i][0].read()
+                    if eval_stack is None:  # If the stack is empty, set it to this data
+                        eval_stack = data[0]
+                    else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
+                        eval_stack = models.concatenate_lists_of_arrays(eval_stack, data[0])
+                    eval_owner_stack += [[i, data[0][0].shape[0]]]
+
+                    if training_data_x_stack is None:
+                        training_data_x_stack = data[0]
+                        training_data_y_stack = data[1]
+                    else:
+                        training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
+                        training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
+
 
             if (len(eval_owner_stack)>=min_length_table[model_index]) or (greedy_eval and len(eval_owner_stack)>0):
                 #print("Started eval")
@@ -121,6 +143,11 @@ if trainer_thread:
         if perf_counter() - last_eval_time > 10:
             greedy_eval = True
 
+        try:  # If the parent isn't running, die.
+            os.kill(manager_pid, 0)
+        except:
+            exit(0)
+
 
 
 else: #If we are not a trainer thread, we are still the top thread: set up game threads now.
@@ -138,9 +165,13 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
             self.eval_in_channel.write("p")
             self.eval_in_channel.write(x)
             self.eval_out_channel.idle_until_data()
-            data = self.eval_out_channel.read()
-            #print("Finished request")
-            return data
+            return self.eval_out_channel.read()
+
+        def fit_predict(self, x, y, **kwargs):
+            self.eval_in_channel.write("b")
+            self.eval_in_channel.write((x,y))
+            self.eval_out_channel.idle_until_data()
+            return self.eval_out_channel.read()
 
 
     my_index = -1
@@ -159,13 +190,14 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
         evaluators = []
         for i in range (NUM_EVALUATORS): #Generate the five evaluators. They will communicate with the parent process for direction
             evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
-        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators #Map them in
+        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, game_state_evaluator = evaluators #Map them in
 
         for i in range (games_per_thread):
             if my_index==0:
                 print("Playing game", i)
             trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
-                                                captain_block_evaluator, challenge_evaluator, q_epsilon=.4, verbose=False)
+                                                captain_block_evaluator, challenge_evaluator, game_state_evaluator,
+                                                q_epsilon=.4, verbose=False)
             game_continuing = True
             while game_continuing:
                 game_continuing = trainer.take_turn()
@@ -185,10 +217,10 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
         evaluators = []
         for i in range(NUM_EVALUATORS):  # Generate the evaluators. They will communicate with the parent process for direction
             evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
-        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator = evaluators  # Map them in
+        action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, game_state_evaluator = evaluators  # Map them in
 
         import train
-        trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, q_epsilon=0, verbose=True)
+        trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, game_state_evaluator, q_epsilon=0, verbose=True)
         game_continuing=True
         while game_continuing:
             game_continuing = trainer.take_turn()

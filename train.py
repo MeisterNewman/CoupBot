@@ -87,7 +87,7 @@ def combine_ready_from_list(queue_list):
 
 
 class GameTrainingWrapper:
-    def __init__(self, num_players, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, q_epsilon, verbose):
+    def __init__(self, num_players, action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, hand_predictor, q_epsilon, verbose):
         self.game = game.CoupGame(num_players)
 
         self.action_evaluator = action_evaluator
@@ -95,26 +95,31 @@ class GameTrainingWrapper:
         self.aid_block_evaluator = aid_block_evaluator
         self.captain_block_evaluator = captain_block_evaluator
         self.challenge_evaluator = challenge_evaluator
+        self.hand_predictor = hand_predictor
 
         self.action_evaluation_data_queues = []
         self.assassin_block_evaluation_data_queues = []
         self.aid_block_evaluation_data_queues = []
         self.captain_block_evaluation_data_queues = []
         self.challenge_evaluation_data_queues = []
+        self.hand_predictor_data_queues = []
         for i in range (0, num_players):
             self.action_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.assassin_block_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.aid_block_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.captain_block_evaluation_data_queues += [ActionEvaluatorQueue()]
             self.challenge_evaluation_data_queues += [ActionEvaluatorQueue()]
+            self.hand_predictor_data_queues += [ActionEvaluatorQueue()]
 
-        self.predicted_hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
-        self.all_data_queues = [self.action_evaluation_data_queues, self.assassin_block_evaluation_data_queues, self.aid_block_evaluation_data_queues, self.captain_block_evaluation_data_queues, self.challenge_evaluation_data_queues]
+
+        self.all_data_queues = [self.action_evaluation_data_queues, self.assassin_block_evaluation_data_queues, self.aid_block_evaluation_data_queues, self.captain_block_evaluation_data_queues, self.challenge_evaluation_data_queues, self.hand_predictor_data_queues]
 
         self.q_epsilon = q_epsilon
         self.verbose = verbose
 
         self.next_turn_q_biases = [0]*game.MAX_PLAYERS
+
+        self.predicted_hand_states = np.full((game.MAX_PLAYERS, 5), .4, dtype=np.float32)
 
     def print_game_state(self):
         print ("Raw hands:", self.game.hands)
@@ -122,26 +127,71 @@ class GameTrainingWrapper:
         print("Coins: ", self.game.player_coins)
 
 
-    # def update_hand_states(self, player, action, target, failed_to_block=False): #Failed-to-block
-    #
-    #     nondiscarded_cards = self.game.count_inplay()
-    #
-    #     prior_probability = row_to_first(self.predicted_hand_states, player)
-    #     num_cards = row_to_first(self.game.hand_sizes(), player)
-    #     num_coins = rows_to_first_second(self.game.player_coins, player)
-    #
-    #     target = (target-player) % (game.MAX_PLAYERS-1)  #Make target relative
-    #
-    #     input = [
-    #         one_hot()
-    #     ]
+    def update_hand_states(self, players, actions, targets, failed_to_block, resultant_hand_states): #Failed-to-block
+        if isinstance(players, int):
+            players = [players]
+            actions = [actions]
+            targets = [targets]
+            resultant_hand_states = [resultant_hand_states]
+            failed_to_block = [failed_to_block]
+
+        num_actions = len(players)
+
+
+        nondiscarded_cards = zero_axis_tile(self.game.count_inplay(), num_actions)
+
+        prior_probabilities = zero_axis_tile(self.predicted_hand_states, num_actions)
+        num_cards = zero_axis_tile(self.game.hand_sizes(), num_actions)
+        num_coins = zero_axis_tile(self.game.player_coins, num_actions)
+        action_array = one_hot(np.array(actions), game.NUM_ACTIONS)
+        target_array = np.zeros((num_actions, game.MAX_PLAYERS-1), dtype=np.float32)
+        for i in range (num_actions):
+            prior_probabilities[i] = row_to_first(prior_probabilities[i], players[i])
+            num_cards[i] = row_to_first(num_cards[i], players[i])
+            num_coins[i] = row_to_first(num_coins[i], players[i])
+            if failed_to_block[i]:
+                action_array[i] = -action_array[i]
+            if targets[i] != -1:
+                targets[i] = (targets[i] - players[i]) % (game.MAX_PLAYERS - 1)  # Make target relative
+                target_array[i:i+1] = one_hot(np.array([targets[i]]), game.MAX_PLAYERS - 1)
+            else:
+                target_array[i:i+1] = np.zeros((1, game.MAX_PLAYERS - 1), dtype=np.float32)
+
+
+
+
+
+
+
+        input = [
+            nondiscarded_cards,
+            prior_probabilities,
+            num_cards,
+            num_coins,
+            action_array,
+            target_array,
+        ]
+
+        outputs = np.concatenate([np.expand_dims(s, axis=0) for s in resultant_hand_states], axis=0)
+
+
+        if not (getattr(self.hand_predictor, "fit_predict", None) is None):  # If we have access to fit_predict, it saves time
+            results = self.hand_predictor.fit_predict(input, outputs, axis=0)
+        else:
+            results = self.hand_predictor.predict(input)
+            self.hand_predictor.fit(input, outputs, epochs=1)
+
+        for i in range (num_actions):
+            self.predicted_hand_states[players[i]] = results[i]
+
+
 
 
     def decide_challenge(self, challenger, challengee, action, write_decision_to_training):
 
         nondiscarded_cards = self.game.count_inplay()
 
-        prior_probability = rows_to_first_second(np.random.normal(.5, .5, (6, 5)).astype(np.float32), challenger, challengee)
+        prior_probability = rows_to_first_second(self.predicted_hand_states, challenger, challengee)
 
         challenger_cards = self.game.one_hot_hand(challenger)
 
@@ -209,8 +259,7 @@ class GameTrainingWrapper:
 
         nondiscarded_cards = self.game.count_inplay()
 
-        prior_probability = rows_to_first_second(np.random.normal(.5, .5, (6, 5)).astype(np.float32), blocker,
-                                                 blockee)
+        prior_probability = rows_to_first_second(self.predicted_hand_states, blocker,blockee)
 
         blocker_cards = self.game.one_hot_hand(blocker)
 
@@ -284,14 +333,16 @@ class GameTrainingWrapper:
     #     self.game.hands[player]+=[self.game.draw_from_deck()]
 
     def lose_card(self, player):
-        if len(self.game.hands[player])>0:
-            self.game.discards+=[self.game.hands[player].pop(0)]
+        if self.game.hands[player]!=[]:
+            c=self.game.hands[player].pop(0)
+            self.game.discards+=[c]
 
-        LOSS_BIAS=.3
-        self.next_turn_q_biases[player]-=LOSS_BIAS  # Bias for losing a card
-        for i in range (game.MAX_PLAYERS):
-            self.next_turn_q_biases[i]+=LOSS_BIAS/self.game.num_players
+            LOSS_BIAS=.3
+            self.next_turn_q_biases[player]-=LOSS_BIAS  # Bias for losing a card
+            for i in range (game.MAX_PLAYERS):
+                self.next_turn_q_biases[i]+=LOSS_BIAS/self.game.num_players
 
+            return c+11  # This returns the action of losing the card lost
 
     def coup(self, actor, target):
         self.game.player_coins[actor] -= 7
@@ -329,7 +380,7 @@ class GameTrainingWrapper:
         turn_taker=self.game.turn
 
         undiscarded_cards = self.game.count_inplay()
-        prior_probability = row_to_first(np.random.normal(.5,.5,(6,5)).astype(np.float32), turn_taker)
+        prior_probability = row_to_first(self.predicted_hand_states, turn_taker)
         turn_taker_cards = self.game.one_hot_hand(turn_taker)
         num_cards = row_to_first(self.game.hand_sizes(), turn_taker)
         num_coins = row_to_first(self.game.player_coins, turn_taker)
@@ -393,6 +444,10 @@ class GameTrainingWrapper:
         self.action_evaluation_data_queues[turn_taker].append_inputs(
             [x[choice_index] for x in inputs]
         )
+
+        self.update_hand_states(turn_taker, action, target if action in game.TARGETING_ACTIONS else -1, False,
+                                self.game.one_hot_hand(turn_taker))
+
         if self.verbose:
             print("\n")
             print("Turn:", turn_taker)
@@ -400,7 +455,15 @@ class GameTrainingWrapper:
             print("Hands: ", [game.cards_to_names(i) for i in self.game.hands])
             print("Coins: ", self.game.player_coins)
             print("Action:", game.ACTION_REFERENCE[action])
+            print("Turn-taker hand:", game.cards_to_names(self.game.hands[turn_taker]))
+            print("Turn-taker believed hand (post-action):")
+            for i in range (5):
+                print ("\t"+game.CARD_REFERENCE[i] + ":", self.predicted_hand_states[turn_taker][i])
             print("Target:", target)
+
+
+
+
 
         if (action == game.COUP):
             self.coup(turn_taker, target)
@@ -419,6 +482,7 @@ class GameTrainingWrapper:
                     if self.game.has_card(blocking_player, game.DUKE):
                         self.lose_card(turn_taker)
                         self.game.replace(blocking_player, game.DUKE)
+
                     else:
                         self.lose_card(blocking_player)
                         self.foreign_aid(turn_taker)
@@ -509,6 +573,7 @@ class GameTrainingWrapper:
                     while queue_type[i].num_outputs()<queue_type[i].num_inputs():
                         queue_type[i].append_output(np.array([0], dtype=np.float32))
                 self.game.player_coins[i]=0
+                self.predicted_hand_states[i]=np.zeros((5), dtype=np.float32)
 
             else:
                 players_alive+=1
@@ -538,3 +603,4 @@ class GameTrainingWrapper:
         self.train_evaluator(self.captain_block_evaluation_data_queues, self.captain_block_evaluator, verbose)
         self.train_evaluator(self.aid_block_evaluation_data_queues, self.aid_block_evaluator, verbose)
         self.train_evaluator(self.challenge_evaluation_data_queues, self.challenge_evaluator, verbose)
+        self.train_evaluator(self.hand_predictor_data_queues, self.hand_predictor, verbose)
