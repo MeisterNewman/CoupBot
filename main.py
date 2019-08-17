@@ -3,7 +3,7 @@ import numpy as np
 
 from communication import CommunicationChannel
 
-
+from copy import deepcopy
 
 
 # We need 7 communications channels: one for evaluation data to the supervisor, one for evaluation results from the supervisor, and five for data to the individual trainers
@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 2500
+games_per_thread = 50
 num_threads = 128
 NUM_EVALUATORS = 6
 
@@ -79,16 +79,17 @@ if trainer_thread:
     training_data_y_stack = None
 
     min_length_table = { #The sum of these must be less than the total number of threads
-        0: 36,  # This and 5 may want to be changed
-        1: 4,
-        2: 4,
-        3: 4,
-        4: 2,
-        5: 36,
+        0: 30,  # This and 5 may want to be changed
+        1: 2, # 4
+        2: 2, # 4
+        3: 2, # 4
+        4: 20, # 2
+        5: 30,
     }
-    last_eval_time=perf_counter()
-    greedy_eval=False
+
+    greed=1
     while 1:
+        last_eval_time = perf_counter()
         for i in range (len(model_data_pipes)):
             if model_data_pipes[i][0].has_data():
                 ins = model_data_pipes[i][0].read()
@@ -123,7 +124,8 @@ if trainer_thread:
                         training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
 
 
-            if (len(eval_owner_stack)>=min_length_table[model_index]) or (greedy_eval and len(eval_owner_stack)>0):
+
+            if (len(eval_owner_stack)>=min_length_table[model_index] * greed):
                 #print("Started eval")
                 eval_result = model.predict(eval_stack, verbose=0, batch_size=4096)
                 #print("Finished eval")
@@ -135,13 +137,19 @@ if trainer_thread:
                 eval_stack = None
                 eval_owner_stack = []
                 last_eval_time=perf_counter()
+                greed *= 1.2
+        greed *= .99
+        if greed<=.01:
+            greed=.01
+        if greed>4:
+            greed=4
+        if perf_counter()-last_eval_time>15:
+            greed=.01
 
         if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048):
             model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0, shuffle=False, )
             training_data_x_stack = None
             training_data_y_stack = None
-        if perf_counter() - last_eval_time > 10:
-            greedy_eval = True
 
         try:  # If the parent isn't running, die.
             os.kill(manager_pid, 0)
@@ -193,11 +201,12 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
         action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, game_state_evaluator = evaluators #Map them in
 
         for i in range (games_per_thread):
+            eps = .4*(.999**i)
             if my_index==0:
-                print("Playing game", i)
+                print("Playing game", i, "with epsilon", eps)
             trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
                                                 captain_block_evaluator, challenge_evaluator, game_state_evaluator,
-                                                q_epsilon=.4, verbose=False)
+                                                q_epsilon=eps, verbose=False)
             game_continuing = True
             while game_continuing:
                 game_continuing = trainer.take_turn()
