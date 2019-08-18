@@ -455,6 +455,7 @@ class GameTrainingWrapper:
             print("Hands: ", [game.cards_to_names(i) for i in self.game.hands])
             print("Coins: ", self.game.player_coins)
             print("Action:", game.ACTION_REFERENCE[action])
+            print("Expected reward:", predicted_rewards[choice_index])
             print("Turn-taker hand:", game.cards_to_names(self.game.hands[turn_taker]))
             print("Turn-taker believed hand (post-action):")
             for i in range (5):

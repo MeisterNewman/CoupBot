@@ -18,7 +18,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 50
+games_per_thread = 5000
 num_threads = 128
 NUM_EVALUATORS = 6
 
@@ -41,12 +41,24 @@ manager_pid = os.getpid()
 for i in range (NUM_EVALUATORS):
     model_pids+=[os.fork()]
     if model_pids[-1]==0:
-        import models
-        model_index = len(model_pids)-1
         trainer_thread = True
-        thread_pipes = [i[model_index] for i in thread_pipes]
-        model_data_pipes = thread_pipes
+        model_index = len(model_pids) - 1
+        break
 
+
+
+
+
+
+if trainer_thread:  # We fork every training thread into two components: scanner and evaluator
+
+    trainer_internal_pipes = [CommunicationChannel(), CommunicationChannel()]  # First is from the gatherer to the trainer, second is vice versa
+    thread_pipes = [i[model_index] for i in thread_pipes]
+    model_data_pipes = thread_pipes
+    runner_pid = os.fork()
+    if runner_pid == 0:  #If we are the actual trainer/evaluator:
+        import models
+        model_index = len(model_pids) - 1
         if model_index == 0:
             model = models.get_action_evaluator()
         elif model_index == 1:
@@ -62,99 +74,178 @@ for i in range (NUM_EVALUATORS):
         else:
             raise RuntimeError("Too many models!")
 
-        break
-
-
-
-
-
-
-if trainer_thread:
-
-    from time import perf_counter
-
-    eval_stack = None
-    eval_owner_stack = []
-    training_data_x_stack = None
-    training_data_y_stack = None
-
-    min_length_table = { #The sum of these must be less than the total number of threads
-        0: 30,  # This and 5 may want to be changed
-        1: 2, # 4
-        2: 2, # 4
-        3: 2, # 4
-        4: 20, # 2
-        5: 30,
-    }
-
-    greed=1
-    while 1:
-        last_eval_time = perf_counter()
-        for i in range (len(model_data_pipes)):
-            if model_data_pipes[i][0].has_data():
-                ins = model_data_pipes[i][0].read()
-                if ins=="t": # If the data is training data, add it to the stacks
-                    data = model_data_pipes[i][0].read()
-                    if training_data_x_stack is None:
-                        training_data_x_stack = data[0]
-                        training_data_y_stack = data[1]
-                    else:
-                        training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
-                        training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
-                elif ins=="p":
-                    data = model_data_pipes[i][0].read()  # It's evaluation data
-                    if eval_stack is None:  # If the stack is empty, set it to this data
-                        eval_stack = data
-                    else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
-                        eval_stack = models.concatenate_lists_of_arrays(eval_stack, data)
-                    eval_owner_stack += [[i, data[0].shape[0]]]
-                else: #We must both fit to and predict on this data
-                    data = model_data_pipes[i][0].read()
-                    if eval_stack is None:  # If the stack is empty, set it to this data
-                        eval_stack = data[0]
-                    else:  # Otherwise, concatenate this data on. We have a list of input arrays, each of which must concatenate individually
-                        eval_stack = models.concatenate_lists_of_arrays(eval_stack, data[0])
-                    eval_owner_stack += [[i, data[0][0].shape[0]]]
-
-                    if training_data_x_stack is None:
-                        training_data_x_stack = data[0]
-                        training_data_y_stack = data[1]
-                    else:
-                        training_data_x_stack = models.concatenate_lists_of_arrays(training_data_x_stack, data[0])
-                        training_data_y_stack = np.concatenate([training_data_y_stack, data[1]], axis=0)
-
-
-
-            if (len(eval_owner_stack)>=min_length_table[model_index] * greed):
-                #print("Started eval")
-                eval_result = model.predict(eval_stack, verbose=0, batch_size=4096)
-                #print("Finished eval")
+        while 1:
+            trainer_internal_pipes[0].idle_until_data()
+            ins = trainer_internal_pipes[0].read()
+            if ins == "t":
+                data = trainer_internal_pipes[0].read()
+                model.fit(data[0], data[1], batch_size=4096, epochs=1, verbose=0, shuffle=False, )
+            else:
+                data, eval_owner_stack = trainer_internal_pipes[0].read()
+                eval_result = model.predict(data, verbose=0, batch_size=data[0].shape[0])
                 stack_index = 0
-                for i in range (len(eval_owner_stack)):
-                    model_data_pipes[eval_owner_stack[i][0]][1].write(eval_result[stack_index:stack_index+eval_owner_stack[i][1]])
+                for i in range(len(eval_owner_stack)):
+                    model_data_pipes[eval_owner_stack[i][0]][1].write(
+                        eval_result[stack_index:stack_index + eval_owner_stack[i][1]] )
                     stack_index += eval_owner_stack[i][1]
                 assert stack_index == eval_result.shape[0]
-                eval_stack = None
-                eval_owner_stack = []
-                last_eval_time=perf_counter()
-                greed *= 1.2
-        greed *= .99
-        if greed<=.01:
-            greed=.01
-        if greed>4:
-            greed=4
-        if perf_counter()-last_eval_time>15:
-            greed=.01
+            trainer_internal_pipes[1].write("d")
 
-        if not (training_data_y_stack is None) and (training_data_y_stack.shape[0]>2048):
-            model.fit(training_data_x_stack, training_data_y_stack, batch_size=4096, epochs=1, verbose=0, shuffle=False, )
-            training_data_x_stack = None
-            training_data_y_stack = None
+    else:
+        num_pipes = len(model_data_pipes)
 
-        try:  # If the parent isn't running, die.
-            os.kill(manager_pid, 0)
-        except:
-            exit(0)
+        min_length_table = {  # The sum of these must be less than the total number of threads
+            0: 25,  # This and 5 may want to be changed
+            1: 4,  # 4
+            2: 4,  # 4
+            3: 4,  # 4
+            4: 5,  # 2
+            5: 25,
+        }
+
+        min_train_table = {
+            0: 2048,
+            1: 512,
+            2: 512,
+            3: 512,
+            4: 2048,
+            5: 2048,
+        }
+
+        eval_stack = []
+        eval_owner_stack = []
+        training_data_x = []
+        training_data_y = []
+
+        training_samples = 0
+
+        can_send = True
+        while 1:
+            for i in range(num_pipes):
+                if model_data_pipes[i][0].has_data():
+                    ins = model_data_pipes[i][0].read()
+                    if ins == "t":  # If the data is training data, add it to the stacks
+                        data = model_data_pipes[i][0].read()
+                        training_data_x += [data[0]]
+                        training_data_y += [data[1]]
+                        training_samples += data[1].shape[0]
+                    elif ins == "p":
+                        data = model_data_pipes[i][0].read()  # It's evaluation data
+                        eval_stack += [data]
+                        eval_owner_stack += [[i, data[0].shape[0]]]
+                    else:  # We must both fit to and predict on this data
+                        data = model_data_pipes[i][0].read()
+                        eval_stack += [data[0]]
+                        eval_owner_stack += [[i, data[0][0].shape[0]]]
+                        training_data_x += [data[0]]
+                        training_data_y += [data[1]]
+                        training_samples += data[1].shape[0]
+
+                if can_send:
+                    if (training_samples > min_train_table[model_index]):
+                        train_in = []
+                        for d in range(len(training_data_x[0])):
+                            train_in += [np.concatenate([e[d] for e in training_data_x], axis=0)]
+                        train_out = np.concatenate(training_data_y, axis=0)
+
+                        trainer_internal_pipes[0].write("t")
+                        trainer_internal_pipes[0].write((train_in, train_out))
+                        training_data_x = []
+                        training_data_y = []
+                        del train_in
+                        del train_out
+                        training_samples = 0
+                        can_send = False
+                    elif len(eval_owner_stack) > 0:
+                        model_in = []
+                        for d in range(len(eval_stack[0])):
+                            model_in += [np.concatenate([e[d] for e in eval_stack], axis=0)]
+                        trainer_internal_pipes[0].write("e")
+                        trainer_internal_pipes[0].write((model_in, eval_owner_stack))
+
+                        eval_stack = []
+                        del model_in
+                        eval_owner_stack = []
+
+                        can_send = False
+
+                else:
+                    if trainer_internal_pipes[1].has_data():
+                        trainer_internal_pipes[1].read()
+                        can_send = True
+
+
+
+            try:  # If the parent isn't running, die.
+                os.kill(manager_pid, 0)
+            except:
+                os.kill(runner_pid, 15)
+                exit(0)
+
+    # from time import perf_counter
+    #
+    # last_eval_time = perf_counter()
+    # num_pipes = len(model_data_pipes)
+    #
+    #
+    # while 1:
+    #     for i in range (num_pipes):
+    #         if model_data_pipes[i][0].has_data():
+    #             ins = model_data_pipes[i][0].read()
+    #             if ins=="t": # If the data is training data, add it to the stacks
+    #                 data = model_data_pipes[i][0].read()
+    #                 training_data_x += [data[0]]
+    #                 training_data_y += [data[1]]
+    #                 training_samples += data[1].shape[0]
+    #             elif ins=="p":
+    #                 data = model_data_pipes[i][0].read()  # It's evaluation data
+    #                 eval_stack += [data]
+    #                 eval_owner_stack += [[i, data[0].shape[0]]]
+    #             else: #We must both fit to and predict on this data
+    #                 data = model_data_pipes[i][0].read()
+    #                 eval_stack += [data[0]]
+    #                 eval_owner_stack += [[i, data[0][0].shape[0]]]
+    #                 training_data_x += [data[0]]
+    #                 training_data_y += [data[1]]
+    #                 training_samples += data[1].shape[0]
+    #
+    #             if ((len(eval_owner_stack) >= min_length_table[model_index]) or len(eval_owner_stack) > 0 and perf_counter() - last_eval_time > .1):
+    #                 last_eval_time = perf_counter()
+    #
+    #                 model_in = []
+    #                 for d in range (len(eval_stack[0])):
+    #                     model_in += [np.concatenate([e[d] for e in eval_stack], axis=0)]
+    #                 eval_result = model.predict(model_in, verbose=0, batch_size=eval_stack[0][0].shape[0])
+    #                 stack_index = 0
+    #                 for i in range(len(eval_owner_stack)):
+    #                     model_data_pipes[eval_owner_stack[i][0]][1].write(
+    #                         eval_result[stack_index:stack_index + eval_owner_stack[i][1]])
+    #                     stack_index += eval_owner_stack[i][1]
+    #                 assert stack_index == eval_result.shape[0]
+    #                 eval_stack = []
+    #                 del model_in
+    #                 eval_owner_stack = []
+    #
+    #
+    #                 if (training_samples > min_train_table[model_index]):
+    #                     train_in = []
+    #                     for d in range(len(training_data_x[0])):
+    #                         train_in += [np.concatenate([e[d] for e in training_data_x], axis=0)]
+    #                     train_out = np.concatenate(training_data_y, axis=0)
+    #
+    #                     model.fit(train_in, train_out, batch_size=4096, epochs=1, verbose=0,
+    #                               shuffle=False, )
+    #                     training_data_x = []
+    #                     training_data_y = []
+    #                     del train_in
+    #                     del train_out
+    #                     training_samples = 0
+    #
+    #
+    #     try:  # If the parent isn't running, die.
+    #         os.kill(manager_pid, 0)
+    #     except:
+    #         exit(0)
 
 
 
@@ -194,6 +285,8 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
             break
 
     if game_thread:
+        from time import perf_counter
+        last_eval_time = perf_counter()
         import train
         evaluators = []
         for i in range (NUM_EVALUATORS): #Generate the five evaluators. They will communicate with the parent process for direction
@@ -202,8 +295,9 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
         for i in range (games_per_thread):
             eps = .4*(.999**i)
-            if my_index==0:
-                print("Playing game", i, "with epsilon", eps)
+            if my_index==63:
+                print("Playing game", i, "with epsilon", eps, " . Time for previous hand:", perf_counter()-last_eval_time)
+                last_eval_time=perf_counter()
             trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
                                                 captain_block_evaluator, challenge_evaluator, game_state_evaluator,
                                                 q_epsilon=eps, verbose=False)
