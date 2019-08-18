@@ -18,7 +18,8 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 
-games_per_thread = 5000
+games_per_thread = 1000000000  # Outdated
+runtime = 60  # In seconds
 num_threads = 128
 NUM_EVALUATORS = 6
 
@@ -323,13 +324,17 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
 
     else:  # If we are the central supervisory process, wait for all game-playing threads to terminate.
+        from time import sleep
         print ("All children successfully started.")
         num_threads_running = num_threads
         my_pipes = thread_pipes[-1]
         del thread_pipes
-        for i in range (num_threads):
-            if os.waitpid(game_pids[i], 0) != (0,0): # could do os.WNOHANG
-                num_threads_running-=1
+
+        sleep(runtime)
+
+        for i in game_pids:
+            os.kill(i, 15)
+            os.wait()
 
         evaluators = []
         for i in range(NUM_EVALUATORS):  # Generate the evaluators. They will communicate with the parent process for direction
@@ -344,3 +349,4 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
         for p in model_pids:
             os.kill(p, 15) #SIGTERM all model processes
+            os.wait()
