@@ -92,9 +92,22 @@ if trainer_thread:  # We fork every training thread into two components: scanner
             trainer_internal_pipes[1].write("d")
 
     else:
+        from time import perf_counter
+        last_eval_time = perf_counter()
+
+
         num_pipes = len(model_data_pipes)
 
         min_length_table = {  # The sum of these must be less than the total number of threads
+            0: 25,  # This and 5 may want to be changed
+            1: 4,  # 4
+            2: 4,  # 4
+            3: 4,  # 4
+            4: 5,  # 2
+            5: 25,
+        }
+
+        min_length_table_2 = {  # The sum of these must be less than the total number of threads
             0: 25,  # This and 5 may want to be changed
             1: 4,  # 4
             2: 4,  # 4
@@ -142,7 +155,20 @@ if trainer_thread:  # We fork every training thread into two components: scanner
                         training_samples += data[1].shape[0]
 
                 if can_send:
-                    if (training_samples > min_train_table[model_index]):
+                    if len(eval_owner_stack) > 0 and perf_counter()-last_eval_time>.002:  # and (model_index != 5 or len(eval_owner_stack)>40):
+                        last_eval_time=perf_counter()
+                        model_in = []
+                        for d in range(len(eval_stack[0])):
+                            model_in += [np.concatenate([e[d] for e in eval_stack], axis=0)]
+                        trainer_internal_pipes[0].write("e")
+                        trainer_internal_pipes[0].write((model_in, eval_owner_stack))
+
+                        eval_stack = []
+                        del model_in
+                        eval_owner_stack = []
+
+                        can_send = False
+                    elif (training_samples > min_train_table[model_index]):
                         train_in = []
                         for d in range(len(training_data_x[0])):
                             train_in += [np.concatenate([e[d] for e in training_data_x], axis=0)]
@@ -155,18 +181,6 @@ if trainer_thread:  # We fork every training thread into two components: scanner
                         del train_in
                         del train_out
                         training_samples = 0
-                        can_send = False
-                    elif len(eval_owner_stack) > 0:
-                        model_in = []
-                        for d in range(len(eval_stack[0])):
-                            model_in += [np.concatenate([e[d] for e in eval_stack], axis=0)]
-                        trainer_internal_pipes[0].write("e")
-                        trainer_internal_pipes[0].write((model_in, eval_owner_stack))
-
-                        eval_stack = []
-                        del model_in
-                        eval_owner_stack = []
-
                         can_send = False
 
                 else:
@@ -295,7 +309,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
         for i in range (games_per_thread):
             eps = .4*(.999**i)
-            if my_index==63:
+            if my_index==16:
                 print("Playing game", i, "with epsilon", eps, " . Time for previous hand:", perf_counter()-last_eval_time)
                 last_eval_time=perf_counter()
             trainer = train.GameTrainingWrapper(5, action_evaluator, assassin_block_evaluator, aid_block_evaluator,
