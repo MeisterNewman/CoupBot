@@ -19,7 +19,7 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 games_per_thread = 1000000000  # Outdated
-runtime = 250 # In seconds
+runtime = 20 # In seconds
 num_threads = 256
 NUM_EVALUATORS = 6
 
@@ -52,13 +52,15 @@ for i in range (NUM_EVALUATORS):
 
 
 if trainer_thread:  # We fork every training thread into two components: scanner and evaluator
-
+    import datetime
     trainer_internal_pipes = [CommunicationChannel(), CommunicationChannel()]  # First is from the gatherer to the trainer, second is vice versa
     thread_pipes = [i[model_index] for i in thread_pipes]
     model_data_pipes = thread_pipes
     runner_pid = os.fork()
     if runner_pid == 0:  #If we are the actual trainer/evaluator:
+        import signal
         import models
+
         model_index = len(model_pids) - 1
         if model_index == 0:
             model = models.get_action_evaluator()
@@ -74,6 +76,14 @@ if trainer_thread:  # We fork every training thread into two components: scanner
             model = models.get_game_state_predictor()
         else:
             raise RuntimeError("Too many models!")
+
+        def save_exit(signum, frame):
+            datestr = str(datetime.datetime.now()).replace(" ", "_")[:-5]
+            os.makedirs("Model_Weights", exist_ok=True)
+            model.save_weights('Model_Weights/model_'+str(model_index)+'_at_'+datestr+'.h5')
+            exit(0)
+        signal.signal(signal.SIGINT, save_exit)
+        signal.signal(signal.SIGTERM, save_exit)
 
         while 1:
             trainer_internal_pipes[0].idle_until_data()
@@ -93,7 +103,7 @@ if trainer_thread:  # We fork every training thread into two components: scanner
             trainer_internal_pipes[1].write("d")
 
     else:
-
+        import signal
         from time import perf_counter, time_ns
         last_eval_time = perf_counter()
 
@@ -138,6 +148,12 @@ if trainer_thread:  # We fork every training thread into two components: scanner
 
         train_cycle_time = 1*10**7  # In nanoseconds
         last_division = time_ns()-time_ns()%train_cycle_time
+
+        def die_cleanly(signum, frame):
+            os.kill(runner_pid, 15)
+            exit(0)
+        signal.signal(signal.SIGINT, die_cleanly)
+        signal.signal(signal.SIGTERM, die_cleanly)
         while 1:
             for i in range(num_pipes):
                 if model_data_pipes[i][0].has_data():
@@ -196,11 +212,11 @@ if trainer_thread:  # We fork every training thread into two components: scanner
 
 
 
+
             try:  # If the parent isn't running, die.
                 os.kill(manager_pid, 0)
             except:
-                os.kill(runner_pid, 15)
-                exit(0)
+                die_cleanly(0,0)
 
 
 
@@ -245,6 +261,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
     if game_thread:
         from time import perf_counter, sleep
+        from math import pow
         start_time = perf_counter()
         last_eval_time = perf_counter()
         import train
@@ -255,7 +272,7 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
 
 
         for i in range (games_per_thread):
-            eps = .4*(.999**i)
+            eps = .4*pow(.999, i)
             if my_index==16:
                 print("Playing game", i, "with epsilon", eps, " . Time for previous hand:", perf_counter()-last_eval_time)
                 last_eval_time=perf_counter()

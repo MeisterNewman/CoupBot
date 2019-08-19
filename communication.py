@@ -14,6 +14,7 @@ class CommunicationChannel:  #A communication channel sends one object at a time
     def has_data(self):
         return (self.poller.poll(0)!=[])
 
+
     def idle_until_data(self):
         self.poller.poll()
 

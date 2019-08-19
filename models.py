@@ -50,12 +50,14 @@ def get_game_state_predictor(): #Generate a network to predict state of cards in
     num_coins = Input(shape=(6,))  # How many coins each player has (acting player's first)
 
     action_input = Input(shape=(game.NUM_ACTIONS,)) #One-hot, with the exception of a FAILURE to block: in this case, the relevant card category should be made -1
+    target_input = Input(shape=(game.MAX_PLAYERS-1,))
     layers=[
         keras.layers.concatenate([undiscarded_cards,
                                   Flatten()(prior_probability_input),
                                   Lambda(lambda x: x/2)(num_cards),
                                   Lambda(lambda x: x/10)(num_coins),
-                                  action_input]),
+                                  action_input,
+                                  target_input]),
 
         Dense(128, activation='relu'),
         Dropout(.3),
@@ -74,9 +76,11 @@ def get_game_state_predictor(): #Generate a network to predict state of cards in
                                      prior_probability_input,
                                      num_cards,
                                      num_coins,
-                                     action_input),
+                                     action_input,
+                                     target_input),
                              outputs=stackLayers(layers))
     net.compile(optimizer=keras.optimizers.Adam(.001), loss='mse', metrics=['accuracy'])
+    net._make_predict_function()
     return net
 
 def get_action_evaluator():#Generates a network to decide the value of an action, given game state.    May want to make it a conv 1d net for the prior probability input
@@ -128,6 +132,7 @@ def get_action_evaluator():#Generates a network to decide the value of an action
                                      target),
                              outputs=stackLayers(layers))
     net.compile(optimizer=keras.optimizers.Adam(.001), loss='mse', metrics=['accuracy'])
+    net._make_predict_function()
     return net
 
 def get_block_evaluator(steal): #Generates reward evaluator for a specific blocking action. Set steal=true iff that action is stealing
@@ -168,6 +173,7 @@ def get_block_evaluator(steal): #Generates reward evaluator for a specific block
                                      action),
                              outputs=stackLayers(layers))
     net.compile(optimizer=keras.optimizers.Adam(.001), loss='mse', metrics=['accuracy'])
+    net._make_predict_function()
     return net
 
 
@@ -217,6 +223,7 @@ def get_challenge_evaluator(): #Generates reward evaluator for challenges.
                                      challenge),
                              outputs=stackLayers(layers))
     net.compile(optimizer=keras.optimizers.Adam(.001), loss='mse', metrics=['accuracy'])
+    net._make_predict_function()
     return net
 
 
