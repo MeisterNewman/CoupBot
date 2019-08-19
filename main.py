@@ -19,8 +19,8 @@ def concatenate_lists_of_arrays(l1, l2):
 
 
 games_per_thread = 1000000000  # Outdated
-runtime = 60  # In seconds
-num_threads = 128
+runtime = 250 # In seconds
+num_threads = 256
 NUM_EVALUATORS = 6
 
 
@@ -39,14 +39,14 @@ model_pids = []
 manager_pid = os.getpid()
 
 
+
+
 for i in range (NUM_EVALUATORS):
     model_pids+=[os.fork()]
     if model_pids[-1]==0:
         trainer_thread = True
         model_index = len(model_pids) - 1
         break
-
-
 
 
 
@@ -93,7 +93,8 @@ if trainer_thread:  # We fork every training thread into two components: scanner
             trainer_internal_pipes[1].write("d")
 
     else:
-        from time import perf_counter
+
+        from time import perf_counter, time_ns
         last_eval_time = perf_counter()
 
 
@@ -134,6 +135,9 @@ if trainer_thread:  # We fork every training thread into two components: scanner
         training_samples = 0
 
         can_send = True
+
+        train_cycle_time = 1*10**7  # In nanoseconds
+        last_division = time_ns()-time_ns()%train_cycle_time
         while 1:
             for i in range(num_pipes):
                 if model_data_pipes[i][0].has_data():
@@ -156,7 +160,8 @@ if trainer_thread:  # We fork every training thread into two components: scanner
                         training_samples += data[1].shape[0]
 
                 if can_send:
-                    if len(eval_owner_stack) > 0 and perf_counter()-last_eval_time>.002:  # and (model_index != 5 or len(eval_owner_stack)>40):
+                    if len(eval_owner_stack) > 0 and time_ns()-last_division >= train_cycle_time:  # and (model_index != 5 or len(eval_owner_stack)>40):
+                        last_division = (time_ns() // train_cycle_time) * train_cycle_time
                         last_eval_time=perf_counter()
                         model_in = []
                         for d in range(len(eval_stack[0])):
@@ -197,74 +202,11 @@ if trainer_thread:  # We fork every training thread into two components: scanner
                 os.kill(runner_pid, 15)
                 exit(0)
 
-    # from time import perf_counter
-    #
-    # last_eval_time = perf_counter()
-    # num_pipes = len(model_data_pipes)
-    #
-    #
-    # while 1:
-    #     for i in range (num_pipes):
-    #         if model_data_pipes[i][0].has_data():
-    #             ins = model_data_pipes[i][0].read()
-    #             if ins=="t": # If the data is training data, add it to the stacks
-    #                 data = model_data_pipes[i][0].read()
-    #                 training_data_x += [data[0]]
-    #                 training_data_y += [data[1]]
-    #                 training_samples += data[1].shape[0]
-    #             elif ins=="p":
-    #                 data = model_data_pipes[i][0].read()  # It's evaluation data
-    #                 eval_stack += [data]
-    #                 eval_owner_stack += [[i, data[0].shape[0]]]
-    #             else: #We must both fit to and predict on this data
-    #                 data = model_data_pipes[i][0].read()
-    #                 eval_stack += [data[0]]
-    #                 eval_owner_stack += [[i, data[0][0].shape[0]]]
-    #                 training_data_x += [data[0]]
-    #                 training_data_y += [data[1]]
-    #                 training_samples += data[1].shape[0]
-    #
-    #             if ((len(eval_owner_stack) >= min_length_table[model_index]) or len(eval_owner_stack) > 0 and perf_counter() - last_eval_time > .1):
-    #                 last_eval_time = perf_counter()
-    #
-    #                 model_in = []
-    #                 for d in range (len(eval_stack[0])):
-    #                     model_in += [np.concatenate([e[d] for e in eval_stack], axis=0)]
-    #                 eval_result = model.predict(model_in, verbose=0, batch_size=eval_stack[0][0].shape[0])
-    #                 stack_index = 0
-    #                 for i in range(len(eval_owner_stack)):
-    #                     model_data_pipes[eval_owner_stack[i][0]][1].write(
-    #                         eval_result[stack_index:stack_index + eval_owner_stack[i][1]])
-    #                     stack_index += eval_owner_stack[i][1]
-    #                 assert stack_index == eval_result.shape[0]
-    #                 eval_stack = []
-    #                 del model_in
-    #                 eval_owner_stack = []
-    #
-    #
-    #                 if (training_samples > min_train_table[model_index]):
-    #                     train_in = []
-    #                     for d in range(len(training_data_x[0])):
-    #                         train_in += [np.concatenate([e[d] for e in training_data_x], axis=0)]
-    #                     train_out = np.concatenate(training_data_y, axis=0)
-    #
-    #                     model.fit(train_in, train_out, batch_size=4096, epochs=1, verbose=0,
-    #                               shuffle=False, )
-    #                     training_data_x = []
-    #                     training_data_y = []
-    #                     del train_in
-    #                     del train_out
-    #                     training_samples = 0
-    #
-    #
-    #     try:  # If the parent isn't running, die.
-    #         os.kill(manager_pid, 0)
-    #     except:
-    #         exit(0)
 
 
 
 else: #If we are not a trainer thread, we are still the top thread: set up game threads now.
+    from signal import signal, SIGINT, SIGTERM
     class ModelRequestWrapper:
         def __init__(self, eval_in_channel, eval_out_channel):
             self.eval_in_channel = eval_in_channel
@@ -287,6 +229,8 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
             self.eval_out_channel.idle_until_data()
             return self.eval_out_channel.read()
 
+    from os import write, read, pipe
+    game_count_out, game_count_in = pipe()
 
     my_index = -1
     game_pids = []
@@ -300,13 +244,15 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
             break
 
     if game_thread:
-        from time import perf_counter
+        from time import perf_counter, sleep
+        start_time = perf_counter()
         last_eval_time = perf_counter()
         import train
         evaluators = []
         for i in range (NUM_EVALUATORS): #Generate the five evaluators. They will communicate with the parent process for direction
             evaluators += [ModelRequestWrapper(my_pipes[i][0], my_pipes[i][1])]
         action_evaluator, assassin_block_evaluator, aid_block_evaluator, captain_block_evaluator, challenge_evaluator, game_state_evaluator = evaluators #Map them in
+
 
         for i in range (games_per_thread):
             eps = .4*(.999**i)
@@ -319,22 +265,26 @@ else: #If we are not a trainer thread, we are still the top thread: set up game 
             game_continuing = True
             while game_continuing:
                 game_continuing = trainer.take_turn()
+                if perf_counter()-start_time > runtime:
+                    os._exit(0)
             trainer.train_all_evaluators(verbose=0)  # Indent this for more frequent training
         os._exit(0)
 
 
     else:  # If we are the central supervisory process, wait for all game-playing threads to terminate.
-        from time import sleep
+        from os import read
+        from time import sleep, perf_counter
         print ("All children successfully started.")
-        num_threads_running = num_threads
         my_pipes = thread_pipes[-1]
-        del thread_pipes
 
+        start_time = perf_counter()
+        game_count = 0
         sleep(runtime)
-
+        print("Waiting for children to finish terminating.")
         for i in game_pids:
-            os.kill(i, 15)
-            os.wait()
+            os.waitpid(0,0)
+
+        print("Playing example game...")
 
         evaluators = []
         for i in range(NUM_EVALUATORS):  # Generate the evaluators. They will communicate with the parent process for direction
