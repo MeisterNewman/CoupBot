@@ -346,7 +346,7 @@ class GameTrainingWrapper:
 
     def coup(self, actor, target):
         self.game.player_coins[actor] -= 7
-        self.lose_card(target)
+        return self.lose_card(target)
 
     def foreign_aid(self, actor):
         self.game.player_coins[actor] += 2
@@ -359,7 +359,7 @@ class GameTrainingWrapper:
 
     def assassinate(self, actor, target):
         self.game.player_coins[actor] -= 3
-        self.lose_card(target)
+        return self.lose_card(target)
 
     def steal(self, actor, target):
         stolen = min(self.game.player_coins[target], 2)
@@ -467,7 +467,10 @@ class GameTrainingWrapper:
 
 
         if (action == game.COUP):
-            self.coup(turn_taker, target)
+            loss = self.coup(turn_taker, target)
+            self.update_hand_states(target, loss, -1, False,
+                                    self.game.one_hot_hand(turn_taker))
+
 
         if (action == game.INCOME):
             self.income(turn_taker)
@@ -481,12 +484,17 @@ class GameTrainingWrapper:
 
                 if challenge_info[0]: #If the block was challenged
                     if self.game.has_card(blocking_player, game.DUKE):
-                        self.lose_card(turn_taker)
+                        loss = self.lose_card(turn_taker)
                         self.game.replace(blocking_player, game.DUKE)
+                        self.update_hand_states([turn_taker, blocking_player], [loss, game.RESHUFFLE_DUKE], [-1, -1], [False, False],
+                                                [self.game.one_hot_hand(turn_taker), self.game.one_hot_hand(blocking_player)])
 
                     else:
-                        self.lose_card(blocking_player)
+                        loss = self.lose_card(blocking_player)
                         self.foreign_aid(turn_taker)
+                        self.update_hand_states([blocking_player], [loss], [-1],
+                                                [False],
+                                                [self.game.one_hot_hand(blocking_player)])
 
             else: # If no block, write the decision not to block to the training queue for each player, and call the foreign aid
                 self.foreign_aid(turn_taker)
@@ -494,24 +502,47 @@ class GameTrainingWrapper:
         if (action == game.EXCHANGE):
             communal_challenge_results = self.decide_communal_challenge(targets, turn_taker, action)
             if communal_challenge_results[0]:
+                challenging_player = communal_challenge_results[1]
                 if self.game.has_card(turn_taker, game.AMBASSADOR):
-                    self.lose_card(communal_challenge_results[1])
+                    loss = self.lose_card(communal_challenge_results[1])
                     self.game.replace(turn_taker, game.AMBASSADOR)
+                    ohpre = self.game.one_hot_hand(turn_taker)
                     self.exchange(turn_taker)
+                    ohpost = self.game.one_hot_hand(turn_taker)
+                    self.update_hand_states([turn_taker, turn_taker, challenging_player], [game.RESHUFFLE_AMBASSADOR, game.EXCHANGE, loss], [-1, -1, -1],
+                                            [False, False, False],
+                                            [ohpre, ohpost,
+                                             self.game.one_hot_hand(challenging_player)])
+
                 else:
-                    self.lose_card(turn_taker)
+                    loss = self.lose_card(turn_taker)
+                    self.update_hand_states([turn_taker], [loss], [-1],
+                                            [False],
+                                            [self.game.one_hot_hand(turn_taker)])
             else:
                 self.exchange(turn_taker)
+                self.update_hand_states([turn_taker], [game.EXCHANGE], [-1],
+                                        [False],
+                                        [self.game.one_hot_hand(turn_taker)])
 
         if (action == game.TAX):
             communal_challenge_results = self.decide_communal_challenge(targets, turn_taker, action)
             if communal_challenge_results[0]:
                 if self.game.has_card(turn_taker, game.DUKE):
-                    self.lose_card(communal_challenge_results[1])
+                    loss = self.lose_card(communal_challenge_results[1])
                     self.game.replace(turn_taker, game.DUKE)
                     self.tax(turn_taker)
+
+                    self.update_hand_states([turn_taker, communal_challenge_results[1]], [game.RESHUFFLE_DUKE, loss], [-1, -1],
+                                            [False, False],
+                                            [self.game.one_hot_hand(turn_taker), self.game.one_hot_hand(communal_challenge_results[1])])
                 else:
-                    self.lose_card(turn_taker)
+                    loss = self.lose_card(turn_taker)
+                    self.update_hand_states([turn_taker], [loss],
+                                            [-1],
+                                            [False],
+                                            [self.game.one_hot_hand(turn_taker)])
+
             else:
                 self.tax(turn_taker)
 
@@ -524,8 +555,12 @@ class GameTrainingWrapper:
                     counter_challenge_info = self.decide_challenge(turn_taker, target, game.BLOCK_ASSASSINATE, write_decision_to_training=True)
                     if counter_challenge_info[0]:
                         if self.game.has_card(target, game.CONTESSA):
-                            self.lose_card(turn_taker)
+                            loss = self.lose_card(turn_taker)
                             self.game.replace(target, game.CONTESSA)
+                            self.update_hand_states([turn_taker, target], [loss, game.RESHUFFLE_CONTESSA],
+                                                    [-1, -1],
+                                                    [False, False],
+                                                    [self.game.one_hot_hand(turn_taker), self.game.one_hot_hand(target)])
                         else:
                             self.lose_card(target)
                             self.lose_card(target)
@@ -535,10 +570,24 @@ class GameTrainingWrapper:
                         self.lose_card(target)
                         self.assassinate(turn_taker, target)
                         self.game.replace(turn_taker, game.ASSASSIN)
+                        self.update_hand_states([turn_taker], [game.RESHUFFLE_ASSASSIN],
+                                                [-1],
+                                                [False],
+                                                [self.game.one_hot_hand(turn_taker)])
                     else:
-                        self.lose_card(turn_taker)
+                        loss = self.lose_card(turn_taker)
+                        self.update_hand_states([turn_taker], [loss],
+                                                [-1],
+                                                [False],
+                                                [self.game.one_hot_hand(turn_taker)])
             else:
-                self.assassinate(turn_taker, target)
+                pre_hand = self.game.one_hot_hand(target)
+                loss = self.assassinate(turn_taker, target)
+                self.update_hand_states([target, target], [game.BLOCK_ASSASSINATE, loss],
+                                        [-1, -1],
+                                        [False, True],
+                                        [pre_hand, self.game.one_hot_hand(target)])
+
 
         if (action == game.STEAL):
             blocking_info = self.decide_block(target, turn_taker, game.STEAL, write_decision_to_training=True)
@@ -552,21 +601,48 @@ class GameTrainingWrapper:
                                                            write_decision_to_training=True)
                     if counter_challenge_info[0]:
                         if self.game.has_card(target, blocking_card):
-                            self.lose_card(turn_taker)
+                            loss = self.lose_card(turn_taker)
                             self.game.replace(target, blocking_card)
+
+                            self.update_hand_states([turn_taker, target],
+                                                    [loss, blocking_card+16],  # Replace action
+                                                    [-1, -1],
+                                                    [False, False],
+                                                    [self.game.one_hot_hand(turn_taker), self.game.one_hot_hand(target)])
+
                         else:
-                            self.lose_card(target)
+                            loss = self.lose_card(target)
                             self.steal(turn_taker, target)
+                            self.update_hand_states([target],
+                                                    [loss],  # Replace action
+                                                    [-1],
+                                                    [False],
+                                                    [self.game.one_hot_hand(target)])
 
                 else:  # If we decide to challenge
                     if self.game.has_card(turn_taker, game.CAPTAIN):
-                        self.lose_card(target)
+                        loss = self.lose_card(target)
                         self.steal(turn_taker, target)
                         self.game.replace(turn_taker, game.CAPTAIN)
+                        self.update_hand_states([turn_taker, target],
+                                                [game.RESHUFFLE_CAPTAIN, loss],  # Replace action
+                                                [-1, -1],
+                                                [False, False],
+                                                [self.game.one_hot_hand(turn_taker), self.game.one_hot_hand(target)])
                     else:
-                        self.lose_card(turn_taker)
+                        loss = self.lose_card(turn_taker)
+                        self.update_hand_states([turn_taker],
+                                                [loss],  # Replace action
+                                                [-1],
+                                                [False],
+                                                [self.game.one_hot_hand(turn_taker)])
+
             else:  # Otherwise, the steal just goes through
                 self.steal(turn_taker, target)
+                self.update_hand_states([target, target], [game.BLOCK_STEAL_CAPTAIN, game.BLOCK_STEAL_AMBASSADOR],
+                                        [-1, -1],
+                                        [True, True],
+                                        [self.game.one_hot_hand(target), self.game.one_hot_hand(target)])
 
         players_alive=0
         for i in range (self.game.num_players):  # Fill in 0s for rewards for any eliminated players, and set their attributes to 0
